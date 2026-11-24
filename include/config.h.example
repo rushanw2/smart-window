@@ -1,0 +1,9 @@
+#pragma once
+
+// Copy this file to include/config.h and replace the placeholder values.
+// include/config.h is listed in .gitignore so credentials are never committed.
+
+#define WIFI_SSID "YOUR_WIFI_SSID"
+#define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
+#define OPENWEATHER_API_KEY "YOUR_OPENWEATHERMAP_API_KEY"
+#define CITY_QUERY "Austin,TX,US"
