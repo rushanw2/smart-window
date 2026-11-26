@@ -40,6 +40,7 @@ constexpr unsigned long WIFI_CONNECT_TIMEOUT_MS = 15000;
 // Alert turns OFF when (indoor - outdoor) <= (DIFF_THRESHOLD_F - HYSTERESIS_F)
 constexpr float DIFF_THRESHOLD_F = 2.0f;
 constexpr float HYSTERESIS_F = 1.0f;
+constexpr float MIN_INDOOR_TEMP_F = 62.0f;
 
 Adafruit_BME280 bme;
 Adafruit_SSD1306 display(OLED_WIDTH, OLED_HEIGHT, &Wire, OLED_RESET_PIN);
@@ -200,8 +201,16 @@ void updateHysteresisAlert() {
         return;
     }
 
+    if (indoorTempF <= MIN_INDOOR_TEMP_F) {
+        alertActive = false;
+        digitalWrite(ALERT_LED_PIN, LOW);
+        return;
+    }
+
     const float diffF = indoorTempF - outdoorTempF;
-    if (!alertActive && diffF >= (DIFF_THRESHOLD_F + HYSTERESIS_F)) {
+    if (!alertActive &&
+        indoorTempF >= (MIN_INDOOR_TEMP_F + HYSTERESIS_F) &&
+        diffF >= (DIFF_THRESHOLD_F + HYSTERESIS_F)) {
         alertActive = true;
     } else if (alertActive && diffF <= (DIFF_THRESHOLD_F - HYSTERESIS_F)) {
         alertActive = false;
@@ -226,7 +235,7 @@ void printStatus() {
 
     Serial.printf("Wi-Fi  : %s\n", WiFi.status() == WL_CONNECTED ? "Connected" : "Disconnected");
     Serial.printf("Alert  : %s (GPIO %u = %s)\n",
-                  alertActive ? "OPEN WINDOW" : "IDLE",
+                  alertActive ? "OPEN WINDOW" : "CLOSE WINDOW",
                   ALERT_LED_PIN,
                   alertActive ? "HIGH" : "LOW");
 
@@ -260,7 +269,7 @@ void printStatus() {
 
     display.setCursor(0, 52);
     display.print(F("State: "));
-    display.println(alertActive ? F("OPEN WINDOW") : F("IDLE"));
+    display.println(alertActive ? F("OPEN WINDOW") : F("CLOSE WINDOW"));
 
     display.display();
 }
