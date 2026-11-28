@@ -29,9 +29,16 @@ constexpr uint8_t OLED_I2C_ADDR = 0x3C;
 
 // Dual-color OLED bands: green (y = 0..15), physical gap (y = 16..17), blue (y = 18..63)
 constexpr int16_t OLED_HEADER_Y = 4;
-constexpr int16_t OLED_INDOOR_Y = 18;
-constexpr int16_t OLED_OUTDOOR_Y = 30;
-constexpr int16_t OLED_WIFI_Y = 42;
+constexpr int16_t OLED_HERO_Y = 21;
+constexpr int16_t OLED_DEG_CIRCLE_X = 76;
+constexpr int16_t OLED_DEG_CIRCLE_Y = 22;
+constexpr int16_t OLED_DEG_CIRCLE_R = 2;
+constexpr int16_t OLED_HERO_UNIT_X = 80;
+constexpr int16_t OLED_METRIC_X = 93;
+constexpr int16_t OLED_OUTDOOR_Y = 19;
+constexpr int16_t OLED_HUMIDITY_Y = 29;
+constexpr int16_t OLED_WIFI_Y = 39;
+constexpr int16_t OLED_HEARTBEAT_X = 123;
 constexpr int16_t OLED_STATE_Y = 54;
 constexpr int16_t OLED_STATE_BANNER_Y = 52;
 constexpr int16_t OLED_STATE_BANNER_H = 12;
@@ -43,6 +50,7 @@ constexpr uint8_t BME280_FALLBACK_ADDR = 0x77;
 constexpr unsigned long SENSOR_INTERVAL_MS = 5000;
 constexpr unsigned long WEATHER_INTERVAL_MS = 300000;  // 5 minutes
 constexpr unsigned long WIFI_CONNECT_TIMEOUT_MS = 15000;
+constexpr unsigned long ANIM_INTERVAL_MS = 500;
 
 // Hysteresis thresholds in degrees Fahrenheit:
 // Alert turns ON when (indoor - outdoor) >= (DIFF_THRESHOLD_F + HYSTERESIS_F)
@@ -66,6 +74,8 @@ float outdoorTempF = 0.0f;
 
 unsigned long lastSensorReadMs = 0;
 unsigned long lastWeatherFetchMs = 0;
+unsigned long lastAnimMs = 0;
+uint8_t animFrame = 0;
 
 String urlEncode(const char* raw) {
     String encoded;
@@ -242,6 +252,80 @@ void drawBannerText(int16_t rectY, int16_t rectH, int16_t textY, bool inverted, 
     display.setTextColor(SSD1306_WHITE);
 }
 
+void renderOLED() {
+    if (!oledReady) {
+        return;
+    }
+
+    static constexpr char HEARTBEAT_FRAMES[4] = {'|', '/', '-', '\\'};
+
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextWrap(false);
+    display.setTextColor(SSD1306_WHITE);
+
+    // Top green band (y = 0..14)
+    drawBannerText(0, 15, OLED_HEADER_Y, alertActive, "SMART WINDOW");
+
+    // Blue zone hero indoor temperature (x = 0..89, y = 20..44)
+    char heroTempBuf[8];
+    if (!hasIndoorReading) {
+        snprintf(heroTempBuf, sizeof(heroTempBuf), "--.-");
+    } else if (indoorTempF >= 100.0f || indoorTempF <= -10.0f) {
+        snprintf(heroTempBuf, sizeof(heroTempBuf), "%.0f", indoorTempF);
+    } else {
+        snprintf(heroTempBuf, sizeof(heroTempBuf), "%.1f", indoorTempF);
+    }
+
+    display.setTextSize(3);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, OLED_HERO_Y);
+    display.print(heroTempBuf);
+
+    display.drawCircle(OLED_DEG_CIRCLE_X, OLED_DEG_CIRCLE_Y, OLED_DEG_CIRCLE_R, SSD1306_WHITE);
+    display.setTextSize(2);
+    display.setCursor(OLED_HERO_UNIT_X, OLED_HERO_Y);
+    display.print('F');
+
+    // Reset before right-hand metrics (x = 93..127)
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+
+    display.setCursor(OLED_METRIC_X, OLED_OUTDOOR_Y);
+    if (!hasOutdoorReading) {
+        display.print(F("Out:--"));
+    } else if (outdoorTempF >= 99.5f || outdoorTempF <= -9.5f) {
+        display.printf("O:%.0f", outdoorTempF);
+    } else {
+        display.printf("Out:%.0f", outdoorTempF);
+    }
+
+    display.setCursor(OLED_METRIC_X, OLED_HUMIDITY_Y);
+    if (!hasIndoorReading) {
+        display.print(F("RH:--%"));
+    } else if (indoorHumidity >= 99.5f) {
+        display.print(F("H:100%"));
+    } else {
+        display.printf("RH:%.0f%%", indoorHumidity);
+    }
+
+    display.setCursor(OLED_METRIC_X, OLED_WIFI_Y);
+    display.print(WiFi.status() == WL_CONNECTED ? F("WF:OK") : F("WF:--"));
+    display.setCursor(OLED_HEARTBEAT_X, OLED_WIFI_Y);
+    display.print(HEARTBEAT_FRAMES[animFrame % 4U]);
+
+    // Reset before bottom blue banner (y = 52..63)
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    drawBannerText(OLED_STATE_BANNER_Y,
+                   OLED_STATE_BANNER_H,
+                   OLED_STATE_Y,
+                   alertActive,
+                   alertActive ? "State: OPEN WINDOW" : "State: CLOSE WINDOW");
+
+    display.display();
+}
+
 void printStatus() {
     Serial.println(F("----- Smart Window Status -----"));
     if (hasIndoorReading) {
@@ -262,40 +346,7 @@ void printStatus() {
                   ALERT_LED_PIN,
                   alertActive ? "HIGH" : "LOW");
 
-    if (!oledReady) {
-        return;
-    }
-
-    display.clearDisplay();
-    display.setTextSize(1);
-    display.setTextWrap(false);
-
-    drawBannerText(0, 15, OLED_HEADER_Y, alertActive, "SMART WINDOW");
-
-    display.setCursor(0, OLED_INDOOR_Y);
-    if (hasIndoorReading) {
-        display.printf("In : %.1f F  %.0f%%", indoorTempF, indoorHumidity);
-    } else {
-        display.print(F("In : ERR (BME280)"));
-    }
-
-    display.setCursor(0, OLED_OUTDOOR_Y);
-    if (hasOutdoorReading) {
-        display.printf("Out: %.1f F", outdoorTempF);
-    } else {
-        display.print(F("Out: --.- F"));
-    }
-
-    display.setCursor(0, OLED_WIFI_Y);
-    display.printf("WiFi: %s", WiFi.status() == WL_CONNECTED ? "OK" : "DISC");
-
-    drawBannerText(OLED_STATE_BANNER_Y,
-                   OLED_STATE_BANNER_H,
-                   OLED_STATE_Y,
-                   alertActive,
-                   alertActive ? "State: OPEN WINDOW" : "State: CLOSE WINDOW");
-
-    display.display();
+    renderOLED();
 }
 
 }  // namespace
@@ -329,11 +380,13 @@ void setup() {
     const unsigned long now = millis();
     lastSensorReadMs = now;
     lastWeatherFetchMs = now;
+    lastAnimMs = now;
 }
 
 void loop() {
     const unsigned long now = millis();
     bool statusChanged = false;
+    bool animChanged = false;
 
     if (now - lastSensorReadMs >= SENSOR_INTERVAL_MS) {
         lastSensorReadMs = now;
@@ -351,8 +404,16 @@ void loop() {
         statusChanged = true;
     }
 
+    if (now - lastAnimMs >= ANIM_INTERVAL_MS) {
+        lastAnimMs = now;
+        animFrame = static_cast<uint8_t>((animFrame + 1U) % 4U);
+        animChanged = true;
+    }
+
     if (statusChanged) {
         updateHysteresisAlert();
         printStatus();
+    } else if (animChanged) {
+        renderOLED();
     }
 }
