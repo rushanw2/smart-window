@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <cctype>
+#include <cstring>
 #include <Wire.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
@@ -45,12 +46,17 @@ constexpr int16_t OLED_STATE_BANNER_H = 12;
 
 constexpr uint8_t BME280_PRIMARY_ADDR = 0x76;
 constexpr uint8_t BME280_FALLBACK_ADDR = 0x77;
+constexpr uint32_t I2C_CLOCK_HZ = 100000UL;
+constexpr float BME280_MIN_PRESSURE_HPA = 300.0f;
+constexpr float BME280_MAX_PRESSURE_HPA = 1100.0f;
 
 // Timing intervals (milliseconds)
 constexpr unsigned long SENSOR_INTERVAL_MS = 5000;
 constexpr unsigned long WEATHER_INTERVAL_MS = 300000;  // 5 minutes
 constexpr unsigned long WIFI_CONNECT_TIMEOUT_MS = 15000;
 constexpr unsigned long ANIM_INTERVAL_MS = 500;
+constexpr unsigned long SENSOR_STUCK_TIMEOUT_MS = 30000;
+constexpr uint8_t SENSOR_MAX_CONSECUTIVE_FAILURES = 3;
 
 // Hysteresis thresholds in degrees Fahrenheit:
 // Alert turns ON when (indoor - outdoor) >= (DIFF_THRESHOLD_F + HYSTERESIS_F)
@@ -60,7 +66,7 @@ constexpr float HYSTERESIS_F = 1.0f;
 constexpr float MIN_INDOOR_TEMP_F = 62.0f;
 
 Adafruit_BME280 bme;
-Adafruit_SSD1306 display(OLED_WIDTH, OLED_HEIGHT, &Wire, OLED_RESET_PIN);
+Adafruit_SSD1306 display(OLED_WIDTH, OLED_HEIGHT, &Wire, OLED_RESET_PIN, I2C_CLOCK_HZ, I2C_CLOCK_HZ);
 
 bool bmeReady = false;
 bool oledReady = false;
@@ -76,6 +82,13 @@ unsigned long lastSensorReadMs = 0;
 unsigned long lastWeatherFetchMs = 0;
 unsigned long lastAnimMs = 0;
 uint8_t animFrame = 0;
+
+uint8_t consecutiveSensorFailures = 0;
+bool hasLastSensorSample = false;
+float lastRawTempC = 0.0f;
+float lastRawHum = 0.0f;
+float lastRawPressureHpa = 0.0f;
+unsigned long lastSensorChangeMs = 0;
 
 String urlEncode(const char* raw) {
     String encoded;
@@ -108,7 +121,7 @@ bool initBME280() {
 }
 
 bool initOLED() {
-    if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_I2C_ADDR)) {
+    if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_I2C_ADDR, true, false)) {
         Serial.println(F("ERROR: SSD1306 OLED not found at 0x3C"));
         return false;
     }
@@ -198,19 +211,109 @@ bool fetchOutdoorTempF(float& outTempF) {
     return true;
 }
 
-void readIndoorSensor() {
+bool readValidBME280Sample(float& tempC, float& hum, float& pressureHpa) {
     if (!bmeReady) {
-        return;
+        return false;
     }
 
-    const float tempC = bme.readTemperature();
-    const float hum = bme.readHumidity();
-    if (!isnan(tempC)) {
-        indoorTempF = tempC * 9.0f / 5.0f + 32.0f;
-        indoorHumidity = isnan(hum) ? 0.0f : hum;
-        hasIndoorReading = true;
+    tempC = bme.readTemperature();
+    hum = bme.readHumidity();
+    pressureHpa = bme.readPressure() / 100.0f;
+
+    return !isnan(tempC) && !isnan(hum) && !isnan(pressureHpa) &&
+           pressureHpa >= BME280_MIN_PRESSURE_HPA &&
+           pressureHpa <= BME280_MAX_PRESSURE_HPA;
+}
+
+void recoverI2CBusAndBME280() {
+    Serial.println(F("WARNING: Attempting 9-clock I2C bus recovery and BME280 re-init..."));
+    Wire.end();
+
+    // Pulse SCL 9 times to release any slave holding SDA low, then issue a STOP condition.
+    pinMode(I2C_SDA_PIN, INPUT_PULLUP);
+    pinMode(I2C_SCL_PIN, OUTPUT);
+    digitalWrite(I2C_SCL_PIN, HIGH);
+    delayMicroseconds(10);
+
+    for (uint8_t i = 0; i < 9; ++i) {
+        digitalWrite(I2C_SCL_PIN, LOW);
+        delayMicroseconds(10);
+        digitalWrite(I2C_SCL_PIN, HIGH);
+        delayMicroseconds(10);
+    }
+
+    pinMode(I2C_SDA_PIN, OUTPUT);
+    digitalWrite(I2C_SDA_PIN, LOW);
+    delayMicroseconds(10);
+    digitalWrite(I2C_SCL_PIN, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(I2C_SDA_PIN, HIGH);
+    delayMicroseconds(10);
+
+    Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+    Wire.setClock(I2C_CLOCK_HZ);
+    bmeReady = initBME280();
+}
+
+void readIndoorSensor() {
+    const unsigned long now = millis();
+    float tempC = 0.0f;
+    float hum = 0.0f;
+    float pressureHpa = 0.0f;
+
+    bool valid = readValidBME280Sample(tempC, hum, pressureHpa);
+    bool needsRecovery = false;
+
+    if (!valid) {
+        hasIndoorReading = false;
+        ++consecutiveSensorFailures;
+        Serial.printf("WARNING: Invalid BME280 reading (T=%.2f C, RH=%.2f%%, P=%.2f hPa, failures=%u)\n",
+                      tempC, hum, pressureHpa, consecutiveSensorFailures);
+        if (consecutiveSensorFailures >= SENSOR_MAX_CONSECUTIVE_FAILURES) {
+            needsRecovery = true;
+        }
     } else {
-        Serial.println(F("WARNING: Failed to read temperature from BME280"));
+        consecutiveSensorFailures = 0;
+        const bool identical =
+            hasLastSensorSample &&
+            memcmp(&tempC, &lastRawTempC, sizeof(float)) == 0 &&
+            memcmp(&hum, &lastRawHum, sizeof(float)) == 0 &&
+            memcmp(&pressureHpa, &lastRawPressureHpa, sizeof(float)) == 0;
+
+        if (!identical) {
+            lastRawTempC = tempC;
+            lastRawHum = hum;
+            lastRawPressureHpa = pressureHpa;
+            hasLastSensorSample = true;
+            lastSensorChangeMs = now;
+        } else if ((now - lastSensorChangeMs) > SENSOR_STUCK_TIMEOUT_MS) {
+            Serial.println(F("WARNING: BME280 readings stuck unchanged for >30s"));
+            hasIndoorReading = false;
+            needsRecovery = true;
+        }
+    }
+
+    if (needsRecovery) {
+        recoverI2CBusAndBME280();
+        consecutiveSensorFailures = 0;
+        hasLastSensorSample = false;
+
+        valid = readValidBME280Sample(tempC, hum, pressureHpa);
+        if (valid) {
+            lastRawTempC = tempC;
+            lastRawHum = hum;
+            lastRawPressureHpa = pressureHpa;
+            hasLastSensorSample = true;
+            lastSensorChangeMs = millis();
+        } else {
+            hasIndoorReading = false;
+        }
+    }
+
+    if (valid) {
+        indoorTempF = tempC * 9.0f / 5.0f + 32.0f;
+        indoorHumidity = hum;
+        hasIndoorReading = true;
     }
 }
 
@@ -361,6 +464,7 @@ void setup() {
     digitalWrite(ALERT_LED_PIN, LOW);
 
     Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+    Wire.setClock(I2C_CLOCK_HZ);
 
     oledReady = initOLED();
     bmeReady = initBME280();
