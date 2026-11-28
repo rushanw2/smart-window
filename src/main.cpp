@@ -27,6 +27,15 @@ constexpr uint8_t OLED_HEIGHT = 64;
 constexpr int8_t OLED_RESET_PIN = -1;
 constexpr uint8_t OLED_I2C_ADDR = 0x3C;
 
+// Dual-color OLED bands: green (y = 0..15), physical gap (y = 16..17), blue (y = 18..63)
+constexpr int16_t OLED_HEADER_Y = 4;
+constexpr int16_t OLED_INDOOR_Y = 18;
+constexpr int16_t OLED_OUTDOOR_Y = 30;
+constexpr int16_t OLED_WIFI_Y = 42;
+constexpr int16_t OLED_STATE_Y = 54;
+constexpr int16_t OLED_STATE_BANNER_Y = 52;
+constexpr int16_t OLED_STATE_BANNER_H = 12;
+
 constexpr uint8_t BME280_PRIMARY_ADDR = 0x76;
 constexpr uint8_t BME280_FALLBACK_ADDR = 0x77;
 
@@ -96,9 +105,10 @@ bool initOLED() {
     Serial.println(F("SSD1306 OLED initialized at 0x3C"));
     display.clearDisplay();
     display.setTextSize(1);
+    display.setTextWrap(false);
     display.setTextColor(SSD1306_WHITE);
-    display.setCursor(0, 0);
-    display.println(F("Smart Window Boot..."));
+    display.setCursor(0, OLED_HEADER_Y);
+    display.print(F("Smart Window Boot..."));
     display.display();
     return true;
 }
@@ -219,6 +229,19 @@ void updateHysteresisAlert() {
     digitalWrite(ALERT_LED_PIN, alertActive ? HIGH : LOW);
 }
 
+void drawBannerText(int16_t rectY, int16_t rectH, int16_t textY, bool inverted, const char* text) {
+    if (inverted) {
+        display.fillRect(0, rectY, OLED_WIDTH, rectH, SSD1306_WHITE);
+        display.setTextColor(SSD1306_BLACK);
+    } else {
+        display.setTextColor(SSD1306_WHITE);
+    }
+
+    display.setCursor(0, textY);
+    display.print(text);
+    display.setTextColor(SSD1306_WHITE);
+}
+
 void printStatus() {
     Serial.println(F("----- Smart Window Status -----"));
     if (hasIndoorReading) {
@@ -245,31 +268,32 @@ void printStatus() {
 
     display.clearDisplay();
     display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
+    display.setTextWrap(false);
 
-    display.setCursor(0, 0);
-    display.println(F("SMART WINDOW"));
+    drawBannerText(0, 15, OLED_HEADER_Y, alertActive, "SMART WINDOW");
 
-    display.setCursor(0, 14);
+    display.setCursor(0, OLED_INDOOR_Y);
     if (hasIndoorReading) {
-        display.printf("In : %.1f F  %.0f%%\n", indoorTempF, indoorHumidity);
+        display.printf("In : %.1f F  %.0f%%", indoorTempF, indoorHumidity);
     } else {
-        display.println(F("In : ERR (BME280)"));
+        display.print(F("In : ERR (BME280)"));
     }
 
-    display.setCursor(0, 26);
+    display.setCursor(0, OLED_OUTDOOR_Y);
     if (hasOutdoorReading) {
-        display.printf("Out: %.1f F\n", outdoorTempF);
+        display.printf("Out: %.1f F", outdoorTempF);
     } else {
-        display.println(F("Out: --.- F"));
+        display.print(F("Out: --.- F"));
     }
 
-    display.setCursor(0, 38);
-    display.printf("WiFi: %s\n", WiFi.status() == WL_CONNECTED ? "OK" : "DISC");
+    display.setCursor(0, OLED_WIFI_Y);
+    display.printf("WiFi: %s", WiFi.status() == WL_CONNECTED ? "OK" : "DISC");
 
-    display.setCursor(0, 52);
-    display.print(F("State: "));
-    display.println(alertActive ? F("OPEN WINDOW") : F("CLOSE WINDOW"));
+    drawBannerText(OLED_STATE_BANNER_Y,
+                   OLED_STATE_BANNER_H,
+                   OLED_STATE_Y,
+                   alertActive,
+                   alertActive ? "State: OPEN WINDOW" : "State: CLOSE WINDOW");
 
     display.display();
 }
